@@ -788,33 +788,33 @@ def check_status(message):
 # ---------- Monitor logic ----------
 def monitor_loop():
     """
-    H2I NumberBot V2 — Monitor Thread
+    H2I NumberBot V2 — Monitor Thread (Debounced)
     Mode: Manual (no auto disconnect)
-    ✅ Auto re-sends file if new numbers appear or total count changes
+    ✅ Auto re-sends only once per actual change
+    ✅ Skips duplicate sends within 60s window
     ✅ Skips manually disconnected files
-    ✅ Updates captions safely in both topic/private groups
     """
     mode = "SQLite-Manual"
     logger.info(f"🚀 Monitor thread started in [{mode}] mode. Interval: {CHECK_INTERVAL}s")
 
     state = load_state()
     sent_numbers = load_sent_numbers()
+    COOLDOWN_SECONDS = 60  # 🧩 Prevent duplicate sends within this time window
 
-    # 🔑 Initial login
+    # --- Initial login
     if not login():
         logger.error("Cannot login to panel — will retry in background.")
 
-    # 🧱 Setup DB and state for all countries
+    # --- Prepare state/DBs
     ranges = fetch_country_ranges_from_panel(max_pages=10) or {}
     for cname in ranges.keys():
         ensure_country_file_and_state(state, cname)
         init_country_db(cname)
     save_state(state)
 
-    # ♻️ Main monitoring loop
+    # --- Main loop
     while True:
         try:
-            # Refresh country list
             ranges = fetch_country_ranges_from_panel(max_pages=10)
             if not ranges:
                 logger.warning("⚠️ No country ranges fetched, sleeping...")
@@ -822,7 +822,6 @@ def monitor_loop():
                 continue
 
             state = load_state()
-            sent_numbers = load_sent_numbers()
 
             for country, info in ranges.items():
                 rid = info.get("range")
@@ -832,9 +831,9 @@ def monitor_loop():
                 entry = ensure_country_file_and_state(state, country)
                 db_path = init_country_db(country)
 
-                # Skip if manually disconnected
+                # Skip manual disconnect
                 if entry.get("is_disconnected", False):
-                    logger.info(f"[{country}] ⛔ Skipped (manually disconnected).")
+                    logger.info(f"[{country}] ⛔ Skipped (manual disconnect).")
                     continue
 
                 # Fetch live panel numbers
@@ -842,58 +841,61 @@ def monitor_loop():
                     live_numbers = fetch_numbers_from_panel(rid)
                 except Exception as e:
                     logger.error(f"❌ Fetch failed for {country}: {e}")
-                    alert_admin_message(f"⚠️ {country} fetch failed — {e}")
                     continue
 
-                # Normalize numbers
+                # Normalize
                 live_norm = [re.sub(r"\D", "", str(x)) for x in live_numbers if x]
                 live_norm = [x for x in live_norm if len(x) > 4]
                 live_set = set(live_norm)
 
                 # Get DB stored numbers
                 prev_nums = set(db_get_all_numbers(db_path))
-                db_count_before = len(prev_nums)
-                db_count_after = len(live_set)
+                db_before, db_after = len(prev_nums), len(live_set)
 
-                # Skip if no change in count or content
+                # Skip identical dataset
                 if live_set == prev_nums:
-                    logger.info(f"[{country}] ✅ No change (DB={db_count_before} Panel={db_count_after})")
+                    logger.info(f"[{country}] ✅ No change (DB={db_before} Panel={db_after})")
                     continue
 
-                # Update DB: add new numbers + remove missing ones
+                # Detect differences
                 new_nums = [n for n in live_set if n not in prev_nums]
                 removed_nums = [n for n in prev_nums if n not in live_set]
 
                 if new_nums:
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
-
                 if removed_nums:
                     db_remove_numbers(db_path, removed_nums)
                     logger.info(f"[{country}] ➖ Removed {len(removed_nums)} old numbers")
 
-                # Export updated list to file
+                # Export updated data to file
                 db_export_to_txt(db_path, entry["filepath"], country)
                 entry["numbers"] = list(live_set)
 
-                # 🧠 If total count changed → resend updated file
-                if db_count_before != db_count_after:
-                    try:
-                        send_file_to_group(entry)
-                        save_state(state)
-                        logger.info(f"📤 Resent updated file for {country} ({db_count_after} numbers).")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to re-send file for {country}: {e}")
-                        alert_admin_message(f"⚠️ File re-send failed for {country}: {e}")
-                else:
-                    # Just update caption if count same but time changed
-                    try:
-                        edit_caption_in_group(entry, new_status="✅ ACTIVE")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Caption update failed for {country}: {e}")
+                # 🧩 Debounce check (no duplicate send within 60s)
+                last_time = entry.get("last_sent_time", 0)
+                now = time.time()
+                if now - last_time < COOLDOWN_SECONDS:
+                    logger.info(f"[{country}] ⏸️ Skipped resend (cooldown active {int(now - last_time)}s)")
+                    continue
 
-                # Summary log
-                logger.info(f"[{country}] DB={db_count_after} Panel={db_count_after} | Manual mode")
+                # 📨 Re-send updated file
+                try:
+                    send_file_to_group(entry)
+                    entry["last_sent_time"] = int(time.time())
+                    save_state(state)
+                    logger.info(f"📤 Resent updated file for {country} ({db_after} numbers)")
+                except Exception as e:
+                    logger.error(f"❌ Failed to resend {country}: {e}")
+                    alert_admin_message(f"⚠️ File re-send failed for {country}: {e}")
+
+                # Caption update for safety
+                try:
+                    edit_caption_in_group(entry, new_status="✅ ACTIVE")
+                except Exception as e:
+                    logger.warning(f"⚠️ Caption update failed for {country}: {e}")
+
+                logger.info(f"[{country}] DB={db_after} Panel={db_after} | Manual mode")
                 time.sleep(0.5)
 
         except Exception as e:
