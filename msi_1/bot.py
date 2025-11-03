@@ -277,33 +277,35 @@ def country_state_key(country):
 
 def ensure_country_file_and_state(state, country):
     """
-    Ensure there is one (or more) tracked file entries for this country.
-    If an entry already exists for the same country we reuse the first one.
-    This prevents creating a new random file_code every monitor pass.
+    Ensure there is a tracked file entry for this country.
+    Reuse same file_code for filename + caption.
     """
     key_prefix = country_state_key(country)
 
-    # Try to find an existing entry for this country
+    # Reuse if already exists
     for k, v in state.items():
         if v.get("country") == country:
             return v
 
-    # No existing entry: create one
+    # Create new entry only once
     file_code = rand_file_code(country)
     key = f"{key_prefix}_{file_code}"
     fname = f"{sanitize_fname(country)}_{file_code}.txt"
     fpath = os.path.join(NUMBERS_DIR, fname)
+
     state[key] = {
         "country": country,
-        "file_code": file_code,
+        "file_code": file_code,   # 👈 keep same everywhere
         "filename": fname,
         "filepath": fpath,
         "last_sent_msg_id": None,
+        "private_msg_id": None,
         "last_sent_telegram_file_id": None,
         "last_sent_time": None,
         "numbers": [],
         "is_disconnected": False
     }
+
     save_state(state)
     return state[key]
 
