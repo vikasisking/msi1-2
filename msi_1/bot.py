@@ -341,14 +341,11 @@ def build_caption(country, file_code, total, code_group_link, status):
 def send_file_to_group(state_entry):
     """
     Send generated file to both Topic Group and Private Group.
-    Saves both message IDs in state for future caption edits.
+    Uses SAME file_code as in filename & caption.
     """
     country = state_entry["country"]
     fpath = state_entry["filepath"]
-
-    # Generate new random file code for clarity
-    state_entry["file_code"] = rand_file_code(country)
-    file_code = state_entry["file_code"]
+    file_code = state_entry["file_code"]  # 👈 No new random code here
 
     # Caption always ACTIVE on send
     caption = build_caption(
