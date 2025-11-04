@@ -425,68 +425,68 @@ def send_file_to_group(state_entry):
 
     return sent_success
 
-def edit_caption_in_group(state_entry, new_status=None):
-    """
-    Edits captions in both topic group and private group if message IDs are known.
-    If private group message_id not saved, sends once and remembers it.
-    """
-    country = state_entry["country"]
-    code = state_entry["file_code"]
-    total = len(state_entry["numbers"])
+def edit_caption_in_group(entry, new_status=None):
+    country = entry["country"]
+    file_code = entry["file_code"]
+    total = len(entry.get("numbers", []))
     status = new_status or ("✅ ACTIVE" if total > 0 else "❌ DISCONNECTED")
-    caption = build_caption(country, code, total, CODE_GROUP, status)
+    caption = build_caption(country, file_code, total, CODE_GROUP, status)
 
-    success = False
+    edited_any = False
 
-    # --- Edit in Topic Group ---
-    msg_id = state_entry.get("last_sent_msg_id")
-    if msg_id:
-        try:
+    # --- Topic group edit or resend ---
+    try:
+        if entry.get("last_sent_msg_id"):
             BOT.edit_message_caption(
                 chat_id=DEST_GROUP_ID,
-                message_id=msg_id,
+                message_id=entry["last_sent_msg_id"],
                 caption=caption,
                 parse_mode="Markdown"
             )
-            logger.info(f"✏️ Edited topic group caption for {country} ({status})")
-            success = True
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.warning(f"⚠️ Failed to edit caption for topic group ({country}): {e}")
-    else:
-        logger.debug(f"No topic message_id for {country}, skipping topic edit.")
+            logger.info(f"✏️ Topic group caption updated for {country}")
+            edited_any = True
+        else:
+            with open(entry["filepath"], "rb") as doc:
+                msg = BOT.send_document(
+                    chat_id=DEST_GROUP_ID,
+                    document=doc,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    message_thread_id=TOPIC_ID if TOPIC_ID else None
+                )
+                entry["last_sent_msg_id"] = msg.message_id
+                logger.info(f"📥 Re-sent file to topic group for {country}")
+                edited_any = True
+    except Exception as e:
+        logger.warning(f"⚠️ Topic edit/send failed for {country}: {e}")
 
-    # --- Edit in Private Group ---
-    if PRIVATE_GROUP_ID:
-        priv_id = state_entry.get("private_msg_id")
-        try:
-            if priv_id:
-                # Edit existing private message caption
-                BOT.edit_message_caption(
+    # --- Private group edit or resend ---
+    try:
+        if entry.get("private_msg_id"):
+            BOT.edit_message_caption(
+                chat_id=int(PRIVATE_GROUP_ID),
+                message_id=entry["private_msg_id"],
+                caption=caption,
+                parse_mode="Markdown"
+            )
+            logger.info(f"✏️ Private group caption updated for {country}")
+            edited_any = True
+        else:
+            with open(entry["filepath"], "rb") as doc:
+                msg = BOT.send_document(
                     chat_id=int(PRIVATE_GROUP_ID),
-                    message_id=priv_id,
+                    document=doc,
                     caption=caption,
                     parse_mode="Markdown"
                 )
-                logger.info(f"✏️ Edited private group caption for {country} ({status})")
-            else:
-                # Send first time and remember message_id
-                with open(state_entry["filepath"], "rb") as doc:
-                    msg = BOT.send_document(
-                        chat_id=int(PRIVATE_GROUP_ID),
-                        document=doc,
-                        caption=caption,
-                        parse_mode="Markdown"
-                    )
-                    priv_msg_id = msg.message_id
-                    state_entry["private_msg_id"] = priv_msg_id
-                    save_state(load_state() | {country_state_key(country): state_entry})
-                    logger.info(f"📥 Sent and saved private group message for {country} ({priv_msg_id})")
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.warning(f"⚠️ Failed to edit/send private group caption for {country}: {e}")
+                entry["private_msg_id"] = msg.message_id
+                logger.info(f"📥 Re-sent file to private group for {country}")
+                edited_any = True
+    except Exception as e:
+        logger.warning(f"⚠️ Private edit/send failed for {country}: {e}")
 
-    return success
+    save_state(load_state() | {country_state_key(country): entry})
+    return edited_any
 
 def alert_admin_message(msg):
     """Send direct alert message to admin."""
