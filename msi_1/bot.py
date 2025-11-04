@@ -914,10 +914,16 @@ def monitor_loop():
                 # Update export
                 entry["numbers"] = list(db_get_all_numbers(db_path))
                 db_export_to_txt(db_path, entry["filepath"], country)
+                
+                # 🧩 Safe Cooldown Logic
+                last_time = entry.get("last_sent_time")
 
-                # Cooldown before resend
-                last_time = entry.get("last_sent_time", 0)
-                if time.time() - last_time < COOLDOWN_SECONDS:
+# If last_time is None or invalid, treat as 0 (send immediately)
+                if not isinstance(last_time, (int, float)):
+                    last_time = 0
+
+# Apply cooldown window
+                if time.time() - float(last_time) < COOLDOWN_SECONDS:
                     logger.debug(f"[{country}] ⏸️ Cooldown active, skipping re-send.")
                     continue
 
