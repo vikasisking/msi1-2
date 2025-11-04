@@ -30,7 +30,7 @@ async def forward_from_multiple_bots(event):
         if not text:
             return
 
-        msg_to_send = f"{text}\n\n/disconnect"
+        msg_to_send = f"/disconnect {text}"
         await client.send_message(target_group, msg_to_send)
         print(f"[✔] From @{username} → {target_group} | Forwarded + /disconnect")
     except Exception as e:
