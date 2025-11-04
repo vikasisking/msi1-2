@@ -892,6 +892,32 @@ def monitor_loop():
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
+    # ✏️ Export only the NEW numbers to a temporary send file
+                    temp_path = os.path.join(NUMBERS_DIR, f"{sanitize_fname(country)}_NEW.txt")
+                    with open(temp_path, "w", encoding="utf-8") as f:
+                        f.write(f"# {country} — new numbers only ({now_str()})\n")
+                        for n in new_nums:
+                            f.write(f"{n}\n")
+
+    # 🟢 Send ONLY the new numbers to groups
+                    temp_entry = dict(entry)
+                    temp_entry["filepath"] = temp_path
+                    temp_entry["numbers"] = new_nums
+                    send_file_to_group(temp_entry)
+
+    # Don’t overwrite main file / caption unless you want to show total count
+                    entry["last_sent_time"] = int(time.time())
+                    save_state(state)
+
+    # Optionally clean up temp file
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+
+    # Skip normal export for this loop (avoid re-sending all)
+                    continue
+
                 # Handle removals safely (2-pass confirm)
                 if removed_nums:
                     if country in last_good_panel and removed_nums == last_good_panel[country].get("pending_remove"):
