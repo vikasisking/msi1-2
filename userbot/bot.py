@@ -1,6 +1,7 @@
 from telethon import TelegramClient, events
 import asyncio
 import os
+import re
 
 # -------- CONFIG --------
 API_ID = 22922489
@@ -17,61 +18,78 @@ BOT_GROUP_MAP = {
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 
-# === Handler 1: Forward message text from specific bots ===
+# === Helper: Extract clean country-code patterns (AF-6644 etc.) ===
+def extract_country_codes(text):
+    # Match pattern like "VE-3441", "AF-6644", "KY-6402"
+    pattern = r"\b([A-Z]{2}-\d{4,})\b"
+    found = re.findall(pattern, text)
+    return list(dict.fromkeys(found))  # unique, preserve order
+
+
+# === Handler 1: For bot messages ===
 @client.on(events.NewMessage)
-async def forward_from_multiple_bots(event):
+async def handle_bot_messages(event):
     sender = await event.get_sender()
     username = getattr(sender, "username", None)
 
-    # skip if not from tracked bots
     if username not in BOT_GROUP_MAP:
+        return  # ignore non-tracked senders
+
+    target_group = BOT_GROUP_MAP[username]
+    text = event.raw_text.strip()
+    if not text:
         return
 
     try:
-        target_group = BOT_GROUP_MAP[username]
-        text = event.raw_text.strip()
+        # Detect scanning or file result messages
+        if any(k in text for k in ["Found:", "Not Found:", "File:", "Scanning", "scan completed", "⏱", "✅", "❌"]):
+            codes = extract_country_codes(text)
 
-        # skip empty text messages
-        if not text:
-            return
+            if codes:
+                bot_name = "Searcher 1" if username == "Seacherzsbot" else "Searcher 2"
+                summary = bot_name + ":\n" + "\n".join(codes)
 
-        msg_to_send = f"/disconnect {text}"
-        await client.send_message(target_group, msg_to_send)
-        print(f"[✔] From @{username} → {target_group} | Forwarded + /disconnect")
+                await client.send_message(target_group, summary)
+                print(f"[📊] Sent summary ({len(codes)} codes) from @{username}")
+            else:
+                print(f"[ℹ️] No valid codes found in @{username} message.")
+        else:
+            # For normal text → forward as /disconnect message
+            msg_to_send = f"/disconnect {text}"
+            await client.send_message(target_group, msg_to_send)
+            print(f"[✔] /disconnect forwarded from @{username}")
 
     except Exception as e:
-        print(f"[❌] Error forwarding from @{username}: {e}")
+        print(f"[❌] Error processing message from @{username}: {e}")
 
 
-# === Handler 2: Detect and resend .txt files in private groups ===
+# === Handler 2: Auto resend any .txt file inside private groups ===
 @client.on(events.NewMessage(chats=list(BOT_GROUP_MAP.values())))
 async def resend_txt_file(event):
     try:
-        # check if message contains a document
         if event.message.file and event.message.file.name and event.message.file.name.endswith(".txt"):
             file_name = event.message.file.name
             caption = event.message.text or ""
             chat_id = event.chat_id
 
-            # download the .txt temporarily
+            # download temp file
             path = await event.download_media(file=file_name)
-            print(f"[📁] .txt file received: {file_name}")
+            print(f"[📁] .txt file detected: {file_name}")
 
-            # resend same file with same caption
+            # resend in same group
             await client.send_file(chat_id, path, caption=caption)
-            print(f"[🔁] Resent same .txt file back to group {chat_id}")
+            print(f"[🔁] File re-sent to group {chat_id}")
 
-            # cleanup local file
             if os.path.exists(path):
                 os.remove(path)
 
     except Exception as e:
-        print(f"[❌] Error resending .txt file: {e}")
+        print(f"[❌] Error resending file: {e}")
 
 
 # === MAIN ===
 async def main():
-    print("🚀 Userbot started. Listening for bot messages & .txt files...")
+    print("🚀 Userbot active — listening for bot messages & txt files...")
     await client.start()
     await client.run_until_disconnected()
 
