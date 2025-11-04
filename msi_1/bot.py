@@ -788,29 +788,31 @@ def check_status(message):
 # ---------- Monitor logic ----------
 def monitor_loop():
     """
-    H2I NumberBot V2 — Monitor Thread (Smart Diff Mode)
+    H2I NumberBot — Smart Panel Sync
     ✅ Adds only new unseen numbers
-    ✅ Never overwrites DB with empty list
-    ✅ Ignores invalid/HTML responses
-    ✅ Prevents false '0 numbers' sends
+    ✅ Removes only those confirmed missing in panel
+    ✅ Never writes 0-number file unless verified empty twice
+    ✅ Handles temporary HTML/invalid responses safely
     """
-    mode = "SQLite-SmartDiff"
+    mode = "SQLite-SmartSync"
     logger.info(f"🚀 Monitor thread started in [{mode}] mode. Interval: {CHECK_INTERVAL}s")
 
     state = load_state()
-    sent_numbers = load_sent_numbers()
-    COOLDOWN_SECONDS = 60  # prevent rapid re-sends
+    COOLDOWN_SECONDS = 60
 
-    # 🔐 Login once
+    # Initial login
     if not login():
-        logger.error("Cannot login to panel — will retry in background.")
+        logger.error("Cannot login to panel — retrying in background.")
 
-    # 🧱 Init all countries
+    # Init DBs and states
     ranges = fetch_country_ranges_from_panel(max_pages=10) or {}
     for cname in ranges.keys():
         ensure_country_file_and_state(state, cname)
         init_country_db(cname)
     save_state(state)
+
+    # Keep last good fetch memory
+    last_good_panel = {}
 
     while True:
         try:
@@ -830,19 +832,18 @@ def monitor_loop():
                 entry = ensure_country_file_and_state(state, country)
                 db_path = init_country_db(country)
 
-                # Skip manually disconnected
                 if entry.get("is_disconnected", False):
                     logger.info(f"[{country}] ⛔ Skipped (manual disconnect).")
                     continue
 
-                # Fetch numbers safely
+                # Fetch fresh numbers
                 try:
                     live_numbers = fetch_numbers_from_panel(rid)
                     if not live_numbers:
-                        logger.warning(f"[{country}] ⚠️ Panel gave empty/invalid list, skipping DB overwrite.")
+                        logger.warning(f"[{country}] ⚠️ Panel gave empty list, retrying next loop.")
                         continue
                 except Exception as e:
-                    logger.error(f"❌ Fetch failed for {country}: {e}")
+                    logger.warning(f"⚠️ Fetch failed for {country}: {e}")
                     continue
 
                 # Normalize
@@ -850,52 +851,56 @@ def monitor_loop():
                 live_norm = [x for x in live_norm if len(x) > 4]
                 live_set = set(live_norm)
 
-                # Current DB snapshot
+                # Skip invalid or unstable response
+                if len(live_set) == 0:
+                    logger.debug(f"[{country}] Skipping update (no valid numbers).")
+                    continue
+
                 prev_nums = set(db_get_all_numbers(db_path))
                 db_before = len(prev_nums)
 
-                # Diff check
+                # 1️⃣ Identify changes
                 new_nums = [n for n in live_set if n not in prev_nums]
                 removed_nums = [n for n in prev_nums if n not in live_set]
 
-                # Skip if no new numbers and no valid diff
-                if not new_nums:
-                    logger.info(f"[{country}] ✅ No new numbers (DB={db_before} Panel={len(live_set)})")
-                    continue
+                # 2️⃣ Add new ones only
+                if new_nums:
+                    db_add_numbers(db_path, new_nums)
+                    logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
-                # Add only NEW numbers
-                db_add_numbers(db_path, new_nums)
+                # 3️⃣ Remove only if confirmed missing twice
+                if removed_nums:
+                    # confirm once more next cycle
+                    if country in last_good_panel and removed_nums == last_good_panel[country].get("pending_remove"):
+                        db_remove_numbers(db_path, removed_nums)
+                        logger.info(f"[{country}] ➖ Confirmed {len(removed_nums)} numbers removed")
+                        last_good_panel[country]["pending_remove"] = []
+                    else:
+                        last_good_panel.setdefault(country, {})["pending_remove"] = removed_nums
+                        logger.debug(f"[{country}] 🕓 Pending remove ({len(removed_nums)}) until next confirmation.")
+                        continue
+
+                last_good_panel.setdefault(country, {})["pending_remove"] = []
+
+                # 4️⃣ Update file and send if changed
                 db_after = len(db_get_all_numbers(db_path))
-
-                logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers (DB now {db_after})")
-
-                # Export only if something changed
-                db_export_to_txt(db_path, entry["filepath"], country)
-                entry["numbers"] = list(db_get_all_numbers(db_path))
-
-                # Debounce to avoid duplicates
-                last_time = entry.get("last_sent_time", 0)
-                now = time.time()
-                if now - last_time < COOLDOWN_SECONDS:
-                    logger.info(f"[{country}] ⏸️ Skipped resend (cooldown active {int(now - last_time)}s)")
+                if not new_nums and not removed_nums:
+                    logger.info(f"[{country}] ✅ No change (DB={db_after})")
                     continue
 
-                # Send updated file
-                try:
-                    send_file_to_group(entry)
-                    entry["last_sent_time"] = int(time.time())
-                    save_state(state)
-                    logger.info(f"📤 Sent updated file for {country} ({db_after} numbers)")
-                except Exception as e:
-                    logger.error(f"❌ Failed to send file for {country}: {e}")
-                    alert_admin_message(f"⚠️ File send failed for {country}: {e}")
+                entry["numbers"] = list(db_get_all_numbers(db_path))
+                db_export_to_txt(db_path, entry["filepath"], country)
 
-                # Update caption (safely)
-                try:
-                    edit_caption_in_group(entry, new_status="✅ ACTIVE")
-                except Exception as e:
-                    logger.warning(f"⚠️ Caption update failed for {country}: {e}")
+                # Avoid flood resend
+                last_time = entry.get("last_sent_time", 0)
+                if time.time() - last_time < COOLDOWN_SECONDS:
+                    logger.debug(f"[{country}] ⏸️ Cooldown active, skipping re-send.")
+                    continue
 
+                send_file_to_group(entry)
+                entry["last_sent_time"] = int(time.time())
+                save_state(state)
+                logger.info(f"📤 Updated file sent for {country} ({db_after} numbers)")
                 time.sleep(0.5)
 
         except Exception as e:
@@ -903,6 +908,7 @@ def monitor_loop():
 
         cleanup_old_disconnected(state, days=7)
         time.sleep(CHECK_INTERVAL)
+
 
 # ---------- Flask health endpoint (simple) ----------
 from flask import Flask, Response
