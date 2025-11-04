@@ -277,37 +277,46 @@ def country_state_key(country):
 
 def ensure_country_file_and_state(state, country):
     """
-    Ensure there is a tracked file entry for this country.
-    Reuse same file_code for filename + caption.
+    Ensure there is a consistent, reusable file entry for each country.
+    Reuses the same file_code and message IDs if they exist.
     """
     key_prefix = country_state_key(country)
 
-    # Reuse if already exists
-    for k, v in state.items():
-        if v.get("country") == country:
-            return v
+    # 🔁 Reuse existing entry if country already tracked
+    for key, entry in state.items():
+        if entry.get("country") == country:
+            # Ensure backward compatibility (some keys may be missing)
+            entry.setdefault("file_code", rand_file_code(country))
+            entry.setdefault("filename", f"{sanitize_fname(country)}_{entry['file_code']}.txt")
+            entry.setdefault("filepath", os.path.join(NUMBERS_DIR, entry["filename"]))
+            entry.setdefault("last_sent_msg_id", None)
+            entry.setdefault("private_msg_id", None)
+            entry.setdefault("last_sent_time", None)
+            entry.setdefault("numbers", [])
+            entry.setdefault("is_disconnected", False)
+            return entry
 
-    # Create new entry only once
+    # 🆕 Create new entry (first-time)
     file_code = rand_file_code(country)
     key = f"{key_prefix}_{file_code}"
-    fname = f"{sanitize_fname(country)}_{file_code}.txt"
-    fpath = os.path.join(NUMBERS_DIR, fname)
+    filename = f"{sanitize_fname(country)}_{file_code}.txt"
+    filepath = os.path.join(NUMBERS_DIR, filename)
 
-    state[key] = {
+    entry = {
         "country": country,
-        "file_code": file_code,   # 👈 keep same everywhere
-        "filename": fname,
-        "filepath": fpath,
+        "file_code": file_code,
+        "filename": filename,
+        "filepath": filepath,
         "last_sent_msg_id": None,
         "private_msg_id": None,
-        "last_sent_telegram_file_id": None,
         "last_sent_time": None,
         "numbers": [],
         "is_disconnected": False
     }
 
+    state[key] = entry
     save_state(state)
-    return state[key]
+    return entry
 
 def write_country_file(fpath, country, numbers):
     try:
@@ -788,31 +797,30 @@ def check_status(message):
 # ---------- Monitor logic ----------
 def monitor_loop():
     """
-    H2I NumberBot — Smart Panel Sync
-    ✅ Adds only new unseen numbers
-    ✅ Removes only those confirmed missing in panel
-    ✅ Never writes 0-number file unless verified empty twice
-    ✅ Handles temporary HTML/invalid responses safely
+    H2I NumberBot — Smart Sync with Auto-Recovery
+    ✅ Syncs SQLite DB with live panel data
+    ✅ Auto-recovers disconnected files if panel shows new numbers
+    ✅ Prevents duplicate sends (cooldown protection)
+    ✅ Handles connection errors & HTML fallback safely
     """
-    mode = "SQLite-SmartSync"
+    mode = "SQLite-SmartSync+Recovery"
     logger.info(f"🚀 Monitor thread started in [{mode}] mode. Interval: {CHECK_INTERVAL}s")
 
+    # Load persistent state
     state = load_state()
     COOLDOWN_SECONDS = 60
+    last_good_panel = {}
 
-    # Initial login
+    # Initial panel login
     if not login():
         logger.error("Cannot login to panel — retrying in background.")
 
-    # Init DBs and states
+    # Initialize DBs for all existing or fetched countries
     ranges = fetch_country_ranges_from_panel(max_pages=10) or {}
     for cname in ranges.keys():
         ensure_country_file_and_state(state, cname)
         init_country_db(cname)
     save_state(state)
-
-    # Keep last good fetch memory
-    last_good_panel = {}
 
     while True:
         try:
@@ -832,11 +840,28 @@ def monitor_loop():
                 entry = ensure_country_file_and_state(state, country)
                 db_path = init_country_db(country)
 
+                # 🛑 Check disconnected status
                 if entry.get("is_disconnected", False):
-                    logger.info(f"[{country}] ⛔ Skipped (manual disconnect).")
-                    continue
+                    try:
+                        # Try fetching anyway to check for auto-recovery
+                        live_numbers = fetch_numbers_from_panel(rid)
+                        live_norm = [re.sub(r"\D", "", str(x)) for x in live_numbers if x]
+                        live_norm = [x for x in live_norm if len(x) > 4]
+                        if len(live_norm) > 0:
+                            logger.info(f"[{country}] ♻️ Auto-recovery detected ({len(live_norm)} numbers).")
+                            entry["is_disconnected"] = False
+                            db_add_numbers(db_path, live_norm)
+                            db_export_to_txt(db_path, entry["filepath"], country)
+                            send_file_to_group(entry)
+                            save_state(state)
+                        else:
+                            logger.info(f"[{country}] ⛔ Still disconnected (no panel data).")
+                        continue
+                    except Exception as e:
+                        logger.warning(f"⚠️ Recovery check failed for {country}: {e}")
+                        continue
 
-                # Fetch fresh numbers
+                # 🧭 Fetch current live numbers
                 try:
                     live_numbers = fetch_numbers_from_panel(rid)
                     if not live_numbers:
@@ -851,55 +876,56 @@ def monitor_loop():
                 live_norm = [x for x in live_norm if len(x) > 4]
                 live_set = set(live_norm)
 
-                # Skip invalid or unstable response
                 if len(live_set) == 0:
-                    logger.debug(f"[{country}] Skipping update (no valid numbers).")
+                    logger.debug(f"[{country}] Skipping (no valid numbers).")
                     continue
 
                 prev_nums = set(db_get_all_numbers(db_path))
                 db_before = len(prev_nums)
 
-                # 1️⃣ Identify changes
+                # Detect adds/removals
                 new_nums = [n for n in live_set if n not in prev_nums]
                 removed_nums = [n for n in prev_nums if n not in live_set]
 
-                # 2️⃣ Add new ones only
+                # Add new numbers
                 if new_nums:
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
-                # 3️⃣ Remove only if confirmed missing twice
+                # Handle removals safely (2-pass confirm)
                 if removed_nums:
-                    # confirm once more next cycle
                     if country in last_good_panel and removed_nums == last_good_panel[country].get("pending_remove"):
                         db_remove_numbers(db_path, removed_nums)
-                        logger.info(f"[{country}] ➖ Confirmed {len(removed_nums)} numbers removed")
+                        logger.info(f"[{country}] ➖ Confirmed removal of {len(removed_nums)} numbers")
                         last_good_panel[country]["pending_remove"] = []
                     else:
                         last_good_panel.setdefault(country, {})["pending_remove"] = removed_nums
-                        logger.debug(f"[{country}] 🕓 Pending remove ({len(removed_nums)}) until next confirmation.")
+                        logger.debug(f"[{country}] 🕓 Pending remove ({len(removed_nums)}) until next loop.")
                         continue
+                else:
+                    last_good_panel.setdefault(country, {})["pending_remove"] = []
 
-                last_good_panel.setdefault(country, {})["pending_remove"] = []
-
-                # 4️⃣ Update file and send if changed
+                # Check if DB actually changed
                 db_after = len(db_get_all_numbers(db_path))
-                if not new_nums and not removed_nums:
+                if db_before == db_after:
                     logger.info(f"[{country}] ✅ No change (DB={db_after})")
                     continue
 
+                # Update export
                 entry["numbers"] = list(db_get_all_numbers(db_path))
                 db_export_to_txt(db_path, entry["filepath"], country)
 
-                # Avoid flood resend
+                # Cooldown before resend
                 last_time = entry.get("last_sent_time", 0)
                 if time.time() - last_time < COOLDOWN_SECONDS:
                     logger.debug(f"[{country}] ⏸️ Cooldown active, skipping re-send.")
                     continue
 
+                # Send update to groups
                 send_file_to_group(entry)
                 entry["last_sent_time"] = int(time.time())
                 save_state(state)
+
                 logger.info(f"📤 Updated file sent for {country} ({db_after} numbers)")
                 time.sleep(0.5)
 
@@ -908,7 +934,6 @@ def monitor_loop():
 
         cleanup_old_disconnected(state, days=7)
         time.sleep(CHECK_INTERVAL)
-
 
 # ---------- Flask health endpoint (simple) ----------
 from flask import Flask, Response
