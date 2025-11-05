@@ -795,13 +795,14 @@ def check_status(message):
     BOT.reply_to(message, f"{summary}{details}", parse_mode="Markdown")
 
 # ---------- Monitor logic ----------
-def monitor_loop():
+def monitot_loop():
     """
     H2I NumberBot — Smart Sync with Auto-Recovery
     ✅ Syncs SQLite DB with live panel data
     ✅ Auto-recovers disconnected files if panel shows new numbers
     ✅ Prevents duplicate sends (cooldown protection)
     ✅ Handles connection errors & HTML fallback safely
+    ✅ Sends only NEW numbers while keeping filename consistent
     """
     mode = "SQLite-SmartSync+Recovery"
     logger.info(f"🚀 Monitor thread started in [{mode}] mode. Interval: {CHECK_INTERVAL}s")
@@ -887,36 +888,36 @@ def monitor_loop():
                 new_nums = [n for n in live_set if n not in prev_nums]
                 removed_nums = [n for n in prev_nums if n not in live_set]
 
-                # Add new number
+                # ➕ Handle NEW numbers
                 if new_nums:
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
-    # ✅ Use same file name (Country_FileID.txt)
+                    # ✅ Use same file name (Country_FileID.txt)
                     fpath = entry["filepath"]
 
-    # 🧾 Write only NEW numbers inside same-named file
+                    # 🧾 Write only NEW numbers inside same-named file
                     try:
-                         with open(fpath, "w", encoding="utf-8") as f:
-                              f.write(f"# {country} — new numbers only ({now_str()})\n")
-                              for n in new_nums:
-                                 f.write(f"{n}\n")
-                      except Exception as e:
-                          logger.error(f"Failed to write incremental file for {country}: {e}")
-                          continue
+                        with open(fpath, "w", encoding="utf-8") as f:
+                            f.write(f"# {country} — new numbers only ({now_str()})\n")
+                            for n in new_nums:
+                                f.write(f"{n}\n")
+                    except Exception as e:
+                        logger.error(f"Failed to write incremental file for {country}: {e}")
+                        continue
 
-    # 🟢 Send updated file (with only new numbers)
-                      entry["numbers"] = new_nums  # only fresh batch
-                      send_file_to_group(entry)
+                    # 🟢 Send updated file (with only new numbers)
+                    entry["numbers"] = new_nums  # only fresh batch
+                    send_file_to_group(entry)
 
-    # 🕓 Update last sent timestamp
-                      entry["last_sent_time"] = int(time.time())
-                      save_state(state)
+                    # 🕓 Update last sent timestamp
+                    entry["last_sent_time"] = int(time.time())
+                    save_state(state)
 
-    # Skip to next country (avoid full resend)
-                      continue
+                    # Skip to next country (avoid full resend)
+                    continue
 
-                # Handle removals safely (2-pass confirm)
+                # ➖ Handle REMOVALS safely (2-pass confirm)
                 if removed_nums:
                     if country in last_good_panel and removed_nums == last_good_panel[country].get("pending_remove"):
                         db_remove_numbers(db_path, removed_nums)
@@ -935,21 +936,18 @@ def monitor_loop():
                     logger.info(f"[{country}] ✅ No change (DB={db_after})")
                     continue
 
-                # Update export
-                entry["numbers"] = list(db_get_all_numbers(db_path))
-                db_export_to_txt(db_path, entry["filepath"], country)
-                
                 # 🧩 Safe Cooldown Logic
                 last_time = entry.get("last_sent_time")
-
-# If last_time is None or invalid, treat as 0 (send immediately)
                 if not isinstance(last_time, (int, float)):
                     last_time = 0
 
-# Apply cooldown window
                 if time.time() - float(last_time) < COOLDOWN_SECONDS:
                     logger.debug(f"[{country}] ⏸️ Cooldown active, skipping re-send.")
                     continue
+
+                # Export full DB to main file for consistency
+                entry["numbers"] = list(db_get_all_numbers(db_path))
+                db_export_to_txt(db_path, entry["filepath"], country)
 
                 # Send update to groups
                 send_file_to_group(entry)
