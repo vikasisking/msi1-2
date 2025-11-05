@@ -795,7 +795,7 @@ def check_status(message):
     BOT.reply_to(message, f"{summary}{details}", parse_mode="Markdown")
 
 # ---------- Monitor logic ----------
-def monitot_loop():
+def monitor_loop():
     """
     H2I NumberBot — Smart Sync with Auto-Recovery
     ✅ Syncs SQLite DB with live panel data
