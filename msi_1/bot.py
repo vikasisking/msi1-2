@@ -893,12 +893,23 @@ def monitor_loop():
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
-                    # ✅ Use same file name (Country_FileID.txt)
-                    fpath = entry["filepath"]
+    # 🆕 Generate new file ID each time new numbers appear
+                    new_file_code = rand_file_code(country)
+                    new_filename = f"{sanitize_fname(country)}_{new_file_code}.txt"
+                    new_filepath = os.path.join(NUMBERS_DIR, new_filename)
 
-                    # 🧾 Write only NEW numbers inside same-named file
+    # 🔁 Update entry with new identity
+                    entry["file_code"] = new_file_code
+                    entry["filename"] = new_filename
+                    entry["filepath"] = new_filepath
+                    entry["is_disconnected"] = False
+                    entry["last_sent_msg_id"] = None
+                    entry["private_msg_id"] = None
+                    entry["last_sent_time"] = None
+
+    # 🧾 Write only new numbers to this fresh file
                     try:
-                        with open(fpath, "w", encoding="utf-8") as f:
+                        with open(new_filepath, "w", encoding="utf-8") as f:
                             f.write(f"# {country} — new numbers only ({now_str()})\n")
                             for n in new_nums:
                                 f.write(f"{n}\n")
@@ -906,15 +917,15 @@ def monitor_loop():
                         logger.error(f"Failed to write incremental file for {country}: {e}")
                         continue
 
-                    # 🟢 Send updated file (with only new numbers)
-                    entry["numbers"] = new_nums  # only fresh batch
+    # 🟢 Send updated file (new file ID, same country)
+                    entry["numbers"] = new_nums
                     send_file_to_group(entry)
 
-                    # 🕓 Update last sent timestamp
+    # 🕓 Update timestamp and save state
                     entry["last_sent_time"] = int(time.time())
                     save_state(state)
 
-                    # Skip to next country (avoid full resend)
+    # ✅ Skip rest of loop (avoid duplicate re-send)
                     continue
 
                 # ➖ Handle REMOVALS safely (2-pass confirm)
