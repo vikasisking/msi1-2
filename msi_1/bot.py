@@ -899,34 +899,34 @@ def monitor_loop():
                     new_filepath = os.path.join(NUMBERS_DIR, new_filename)
 
     # 🔁 Update entry with new identity
-                   entry["file_code"] = new_file_code
-                   entry["filename"] = new_filename
-                   entry["filepath"] = new_filepath
-                   entry["is_disconnected"] = False
-                   entry["last_sent_msg_id"] = None
-                   entry["private_msg_id"] = None
-                   entry["last_sent_time"] = None
+                    entry["file_code"] = new_file_code
+                    entry["filename"] = new_filename
+                    entry["filepath"] = new_filepath
+                    entry["is_disconnected"] = False
+                    entry["last_sent_msg_id"] = None
+                    entry["private_msg_id"] = None
+                    entry["last_sent_time"] = None
                
     # 🧾 Write only new numbers to this fresh file
-                   try:
-                       with open(new_filepath, "w", encoding="utf-8") as f:
-                           f.write(f"# {country} — new numbers only ({now_str()})\n")
-                           for n in new_nums:
-                               f.write(f"{n}\n")
-                   except Exception as e:
-                       logger.error(f"Failed to write incremental file for {country}: {e}")
-                       continue
+                    try:
+                        with open(new_filepath, "w", encoding="utf-8") as f:
+                            f.write(f"# {country} — new numbers only ({now_str()})\n")
+                            for n in new_nums:
+                                f.write(f"{n}\n")
+                    except Exception as e:
+                        logger.error(f"Failed to write incremental file for {country}: {e}")
+                        continue
 
     # 🟢 Send updated file (new file ID, same country)
-                   entry["numbers"] = new_nums
-                   send_file_to_group(entry)
+                    entry["numbers"] = new_nums
+                    send_file_to_group(entry)
 
     # 🕓 Update timestamp and save state
-                   entry["last_sent_time"] = int(time.time())
-                   save_state(state)
+                    entry["last_sent_time"] = int(time.time())
+                    save_state(state)
 
     # ✅ Stop here — prevent duplicate full resend
-                   continue
+                    continue
 
                 # ➖ Handle REMOVALS safely (2-pass confirm)
                 if removed_nums:
