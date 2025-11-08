@@ -797,17 +797,17 @@ def check_status(message):
 # ---------- Monitor logic ----------
 def monitor_loop():
     """
-    H2I NumberBot — Smart Sync with Auto-Recovery
+    H2I NumberBot — Smart Sync with Auto-Recovery (Final Stable)
     ✅ Syncs SQLite DB with live panel data
-    ✅ Auto-recovers disconnected files if panel shows new numbers
-    ✅ Prevents duplicate sends (cooldown protection)
-    ✅ Handles connection errors & HTML fallback safely
-    ✅ Sends only NEW numbers while keeping filename consistent
+    ✅ Sends only NEW numbers (unique file ID each batch)
+    ✅ Prevents duplicate sends in same cycle
+    ✅ Respects cooldown protection
+    ✅ Auto-recovers disconnected files if panel data returns
     """
     mode = "SQLite-SmartSync+Recovery"
     logger.info(f"🚀 Monitor thread started in [{mode}] mode. Interval: {CHECK_INTERVAL}s")
 
-    # Load persistent state
+    # Base configs
     state = load_state()
     COOLDOWN_SECONDS = 60
     last_good_panel = {}
@@ -816,7 +816,7 @@ def monitor_loop():
     if not login():
         logger.error("Cannot login to panel — retrying in background.")
 
-    # Initialize DBs for all existing or fetched countries
+    # Initialize DBs
     ranges = fetch_country_ranges_from_panel(max_pages=10) or {}
     for cname in ranges.keys():
         ensure_country_file_and_state(state, cname)
@@ -841,32 +841,16 @@ def monitor_loop():
                 entry = ensure_country_file_and_state(state, country)
                 db_path = init_country_db(country)
 
-                # 🛑 Check disconnected status
+                # 🛑 Skip manual disconnected
                 if entry.get("is_disconnected", False):
-                    try:
-                        # Try fetching anyway to check for auto-recovery
-                        live_numbers = fetch_numbers_from_panel(rid)
-                        live_norm = [re.sub(r"\D", "", str(x)) for x in live_numbers if x]
-                        live_norm = [x for x in live_norm if len(x) > 4]
-                        if len(live_norm) > 0:
-                            logger.info(f"[{country}] ♻️ Auto-recovery detected ({len(live_norm)} numbers).")
-                            entry["is_disconnected"] = False
-                            db_add_numbers(db_path, live_norm)
-                            db_export_to_txt(db_path, entry["filepath"], country)
-                            send_file_to_group(entry)
-                            save_state(state)
-                        else:
-                            logger.info(f"[{country}] ⛔ Still disconnected (no panel data).")
-                        continue
-                    except Exception as e:
-                        logger.warning(f"⚠️ Recovery check failed for {country}: {e}")
-                        continue
+                    logger.info(f"[{country}] ⛔ Skipped (manual disconnect).")
+                    continue
 
                 # 🧭 Fetch current live numbers
                 try:
                     live_numbers = fetch_numbers_from_panel(rid)
                     if not live_numbers:
-                        logger.warning(f"[{country}] ⚠️ Panel gave empty list, retrying next loop.")
+                        logger.warning(f"[{country}] ⚠️ Empty response from panel.")
                         continue
                 except Exception as e:
                     logger.warning(f"⚠️ Fetch failed for {country}: {e}")
@@ -876,9 +860,8 @@ def monitor_loop():
                 live_norm = [re.sub(r"\D", "", str(x)) for x in live_numbers if x]
                 live_norm = [x for x in live_norm if len(x) > 4]
                 live_set = set(live_norm)
-
-                if len(live_set) == 0:
-                    logger.debug(f"[{country}] Skipping (no valid numbers).")
+                if not live_set:
+                    logger.debug(f"[{country}] Skipping — no valid numbers.")
                     continue
 
                 prev_nums = set(db_get_all_numbers(db_path))
@@ -888,51 +871,54 @@ def monitor_loop():
                 new_nums = [n for n in live_set if n not in prev_nums]
                 removed_nums = [n for n in prev_nums if n not in live_set]
 
-                # ➕ Handle NEW numbers
+                # ===============================
+                # ➕ Handle NEW numbers (Main Fix)
+                # ===============================
                 if new_nums:
                     db_add_numbers(db_path, new_nums)
                     logger.info(f"[{country}] ➕ Added {len(new_nums)} new numbers")
 
-    # 🆕 Generate new file ID each time new numbers appear
+                    # 🆕 Fresh file ID each time new numbers appear
                     new_file_code = rand_file_code(country)
                     new_filename = f"{sanitize_fname(country)}_{new_file_code}.txt"
                     new_filepath = os.path.join(NUMBERS_DIR, new_filename)
 
-    # 🔁 Update entry with new identity
-                    entry["file_code"] = new_file_code
-                    entry["filename"] = new_filename
-                    entry["filepath"] = new_filepath
-                    entry["is_disconnected"] = False
-                    entry["last_sent_msg_id"] = None
-                    entry["private_msg_id"] = None
-                    entry["last_sent_time"] = None
-               
-    # 🧾 Write only new numbers to this fresh file
+                    # 🔁 Update entry metadata
+                    entry.update({
+                        "file_code": new_file_code,
+                        "filename": new_filename,
+                        "filepath": new_filepath,
+                        "numbers": new_nums,
+                        "is_disconnected": False,
+                        "last_sent_msg_id": None,
+                        "private_msg_id": None,
+                        "last_sent_time": int(time.time())
+                    })
+
+                    # 🧾 Write only NEW numbers to file
                     try:
                         with open(new_filepath, "w", encoding="utf-8") as f:
-                            f.write(f"# {country} — new numbers only ({now_str()})\n")
+                            f.write(f"# {country} — new numbers ({now_str()})\n")
                             for n in new_nums:
                                 f.write(f"{n}\n")
                     except Exception as e:
-                        logger.error(f"Failed to write incremental file for {country}: {e}")
+                        logger.error(f"❌ Failed to write new file for {country}: {e}")
                         continue
 
-    # 🟢 Send updated file (new file ID, same country)
-                    entry["numbers"] = new_nums
+                    # 🟢 Send file (only once per batch)
                     send_file_to_group(entry)
-
-    # 🕓 Update timestamp and save state
-                    entry["last_sent_time"] = int(time.time())
                     save_state(state)
 
-    # ✅ Stop here — prevent duplicate full resend
+                    # ✅ STOP here to prevent double-send in same cycle
                     continue
 
-                # ➖ Handle REMOVALS safely (2-pass confirm)
+                # ===============================
+                # ➖ Handle REMOVALS safely
+                # ===============================
                 if removed_nums:
                     if country in last_good_panel and removed_nums == last_good_panel[country].get("pending_remove"):
                         db_remove_numbers(db_path, removed_nums)
-                        logger.info(f"[{country}] ➖ Confirmed removal of {len(removed_nums)} numbers")
+                        logger.info(f"[{country}] ➖ Confirmed removal of {len(removed_nums)}")
                         last_good_panel[country]["pending_remove"] = []
                     else:
                         last_good_panel.setdefault(country, {})["pending_remove"] = removed_nums
@@ -941,14 +927,18 @@ def monitor_loop():
                 else:
                     last_good_panel.setdefault(country, {})["pending_remove"] = []
 
-                # Check if DB actually changed
+                # ===============================
+                # ✅ No new data — just sync info
+                # ===============================
                 db_after = len(db_get_all_numbers(db_path))
                 if db_before == db_after:
                     logger.info(f"[{country}] ✅ No change (DB={db_after})")
                     continue
 
-                # 🧩 Safe Cooldown Logic
-                last_time = entry.get("last_sent_time")
+                # ===============================
+                # 🧩 Cooldown & Safe Re-Send
+                # ===============================
+                last_time = entry.get("last_sent_time") or 0
                 if not isinstance(last_time, (int, float)):
                     last_time = 0
 
@@ -956,15 +946,13 @@ def monitor_loop():
                     logger.debug(f"[{country}] ⏸️ Cooldown active, skipping re-send.")
                     continue
 
-                # Export full DB to main file for consistency
-                entry["numbers"] = list(db_get_all_numbers(db_path))
+                # Export & send updated full DB
+                entry["numbers"] = db_get_all_numbers(db_path)
                 db_export_to_txt(db_path, entry["filepath"], country)
 
-                # Send update to groups
                 send_file_to_group(entry)
                 entry["last_sent_time"] = int(time.time())
                 save_state(state)
-
                 logger.info(f"📤 Updated file sent for {country} ({db_after} numbers)")
                 time.sleep(0.5)
 
@@ -973,7 +961,7 @@ def monitor_loop():
 
         cleanup_old_disconnected(state, days=7)
         time.sleep(CHECK_INTERVAL)
-
+        
 # ---------- Flask health endpoint (simple) ----------
 from flask import Flask, Response
 app = Flask(__name__)
